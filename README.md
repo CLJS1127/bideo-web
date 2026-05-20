@@ -12,7 +12,7 @@
 | [2. 메인 페이지](#2-메인-페이지-main) | 외부 추천 API 호출 + 갤러리 무한 스크롤 |
 | [3. 로그인 / 회원가입](#3-로그인--회원가입) | JWT 인증, SMS 본인 인증 |
 | [4. 소셜 로그인](#4-소셜-로그인-oauth-20) | OAuth 2.0, 분산 환경 호환 state |
-| [5. 공통 레이아웃](#5-공통-레이아웃) | 다크/라이트 테마, 반응형 |
+| [5. 공통 레이아웃](#5-공통-레이아웃) | Thymeleaf fragment, 헤더·사이드바·채팅 FAB, 다크모드, 반응형 |
 | [6. 실시간 채팅](#6-실시간-채팅) | WebSocket + STOMP + RabbitMQ + 무한 스크롤 |
 
 ---
@@ -223,7 +223,93 @@ SecurityConfig 에 등록:
 
 ## 5. 공통 레이아웃
 
-모든 페이지 공통의 헤더·사이드바·푸터·다크모드.
+모든 페이지가 공유하는 YouTube 스타일 shell (헤더·사이드바·채팅 FAB·다크모드). Thymeleaf
+fragment 로 한 군데에서 정의하고 각 페이지가 갈아끼우는 방식.
+
+### Thymeleaf fragment 3종 패턴
+
+`templates/layout/layout.html` 한 파일에 3개 fragment 를 정의해 각 페이지가 자기 자리에서 호출.
+
+```html
+<!-- layout/layout.html -->
+<th:block th:fragment="ytShellHead(pageTitle)">
+    <!-- meta / CSS / SockJS / STOMP / 전역 JS -->
+</th:block>
+
+<th:block th:fragment="ytShellChrome(activeItemKey)">
+    <!-- header + sidebar + 채팅 FAB + 검색 portal -->
+</th:block>
+
+<th:block th:fragment="ytShellScripts()">
+    <!-- 페이지 진입 후 실행할 부트스트랩 스크립트 -->
+</th:block>
+```
+
+```html
+<!-- main/main.html — 각 페이지가 fragment 끼워 넣음 -->
+<head>
+    <th:block th:replace="~{layout/layout :: ytShellHead('BIDEO')}"></th:block>
+</head>
+<body>
+    <div th:replace="~{layout/layout :: ytShellChrome('home')}"></div>
+    <main class="bd-shell__page-content">
+        <!-- 페이지 고유 컨텐츠 -->
+    </main>
+</body>
+```
+
+`activeItemKey` 로 사이드바 메뉴 중 어디가 켜져야 할지 알려줌 (`'home'` / `'workdetail'` /
+`'contest'` / `'profile'` 등). fragment 안에서 `th:classappend` 로 `.is-active` 부여.
+
+### 헤더 (`bd-shell__header`)
+
+3 단 구성 — 로고 / 검색바 / 액션 버튼.
+
+```
+[BIDEO 로고] ─── [검색 인풋 + 음성검색 마이크] ─── [만들기] [알림] [프로필]
+```
+
+- **검색바**: 데스크탑은 항상 노출, 모바일은 돋보기 아이콘 누르면 `.bd-shell__mobile-search` 오버레이로 펼침.
+- **음성검색**: Web Speech API 로 즉시 텍스트 변환 후 같은 검색 form submit.
+- **알림 / 프로필**: 드롭다운 — `data-bd-shell-notification-toggle` / `data-bd-shell-profile-toggle` 로 토글.
+
+### 사이드바 (`bd-shell__guide`)
+
+4 개 섹션을 동적으로 렌더링.
+
+| 섹션 | 출처 | 비고 |
+|---|---|---|
+| 가이드 | 정적 (홈 / 작품 / 공모전) | 항상 표시 |
+| 팔로우 한 아티스트 | `followingArtists` 모델 | 최대 5명 + "더 보기" |
+| 보관함 | 정적 (내 페이지 / 찜한 작품) | 로그인 시 |
+| 인기 태그 | `popularTags` 모델 | 비어있으면 섹션 숨김 |
+
+각 페이지 컨트롤러가 `Model` 에 `followingArtists`, `popularTags` 를 넣어주면 fragment 안에서
+`th:if` 로 자연스럽게 분기됨. 모델 안 넣어도 깨지지 않음.
+
+### 채팅 FAB (`bd-chat-fab`)
+
+전역 우하단 떠 있는 채팅 진입 버튼. 어떤 페이지에서든 클릭 한 번으로 `bd-chat-panel` 드로어가
+오버레이로 열림. 안 읽은 메시지가 있으면 빨간 뱃지(`bd-chat-fab__badge`) 노출.
+
+```html
+<button class="bd-chat-fab" aria-controls="bd-chat-panel" data-bd-chat-toggle>
+    <span class="bd-chat-fab__icon">...</span>
+    <span class="bd-chat-fab__badge">3</span>   <!-- 안 읽은 개수 -->
+</button>
+<div class="bd-chat-layer" hidden data-bd-chat-layer>
+    <button class="bd-chat-layer__backdrop" data-bd-chat-dismiss></button>
+    <section id="bd-chat-panel" class="bd-chat-panel" data-bd-chat-panel>
+        <div class="bd-chat-panel__body">
+            <aside class="bd-chat-sidebar">  <!-- 채팅방 리스트 --></aside>
+            <section class="bd-chat-thread"> <!-- 선택된 방의 메시지 --></section>
+        </div>
+    </section>
+</div>
+```
+
+→ 채팅 진입을 위해 별도 페이지 이동이 없음. 작품 보다가도 / 결제하다가도 즉시 대화 가능.
+**실시간 데이터 흐름은 6장 참조.**
 
 ### 다크/라이트 테마
 
@@ -252,6 +338,25 @@ function toggleTheme() {
     localStorage.setItem("bd-theme", next);
 }
 ```
+
+`/css/common/theme.css` 와 `/js/layout/theme.js` 는 `<head>` 에서 **defer 없이** 먼저 로드 —
+페이지 그려지기 전에 테마 결정해 깜빡임(FOUC) 방지.
+
+### 반응형
+
+미디어 쿼리로 두 가지 전환점.
+- `≤ 1024px`: 사이드바 접힘 — 아이콘만 표시
+- `≤ 768px`: 사이드바 완전 hidden — 헤더 검색바도 아이콘 토글식 오버레이로 전환
+
+`.bd-shell` 단일 루트에 `data-bd-shell-root` 마커. JS 가 이 마커로 전체 shell 의 상태(검색 오픈 /
+사이드바 접힘 / 채팅 패널 열림) 를 관리.
+
+### 접근성
+
+- `.bd-shell__skip` — "탐색 건너뛰기" 링크 (스크린리더 사용자 첫 Tab 에서 본문 직행)
+- 모든 아이콘 버튼에 `aria-label`
+- 토글 버튼에 `aria-expanded`, 패널에 `aria-controls`
+- SVG 아이콘은 `aria-hidden="true"` — 라벨은 옆 텍스트로
 
 ### 🔧 트러블슈팅 — 다크 모드 채팅 버블이 네모 박스로 표시됨
 
