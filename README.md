@@ -14,6 +14,7 @@
 | [4. 소셜 로그인](#4-소셜-로그인-oauth-20) | OAuth 2.0, 분산 환경 호환 state |
 | [5. 공통 레이아웃](#5-공통-레이아웃) | Thymeleaf fragment, 헤더·사이드바·채팅 FAB, 다크모드, 반응형 |
 | [6. 실시간 채팅](#6-실시간-채팅) | WebSocket + STOMP + RabbitMQ + 무한 스크롤 |
+| [7. 워터마크 검증 페이지](#7-워터마크-검증-페이지) | 업로드 파일에서 작가 식별자 추출 → 작가 카드 노출 |
 
 ---
 
@@ -530,6 +531,121 @@ function handleRealtimeEvent(event) {
     }
 }
 ```
+
+---
+
+## 7. 워터마크 검증 페이지
+
+작품 업로드 시 이미지/영상에 작가 식별자가 비가시성 워터마크(DWT-DCT)로 박힌다. 저작권 분쟁
+시 추출해서 원본 업로더를 확인하는 페이지. 일반 작가도 본인 작품이 도용된 의심이 들면 그 파일을
+올려 진짜 작가가 누군지 확인 가능.
+
+> 워터마크를 박는 ML 동작과 알고리즘 자체는 별도 [bideo-ai/README.md](../../../ai/workspace/llm/bideo-ai/README.md) 참조.
+> 이 섹션은 **검증 UI / 호출 흐름** 만 다룬다.
+
+### 진입점 — 프로필 드롭다운 (사이드바 X)
+
+우상단 프로필 아이콘 클릭 → 드롭다운의 **"아티스트 도구"** 섹션 아래에 배치:
+
+```
+[작품 관리]      내 작품 · 찜한 작품
+[아티스트 도구]  아티스트 대시보드 · 공모전 참여 현황 · 워터마크 검증   ← 여기
+[설정]           디자인 테마 · 로그아웃
+```
+
+사이드바는 "탐색" 컨텍스트(홈/작품/공모전) 라 검증 같은 도구는 의도적으로 프로필 메뉴로 분리.
+
+### 페이지 흐름
+
+```
+사용자가 우상단 프로필 → "워터마크 검증" 클릭
+        ↓
+GET /watermark/verify                  → verify.html 렌더 (드롭존 + 미리보기)
+        ↓
+이미지/영상 드래그&드롭 또는 파일 선택 → JS 가 즉시 <img>/<video> 미리보기
+        ↓
+"워터마크 검증" 버튼
+        ↓
+POST /api/watermark/verify  (multipart: file)
+        ↓
+WatermarkController.verify()
+   ├─ WatermarkApiClient.extract(bytes, contentType, filename)
+   │     → FastAPI /api/watermark/extract
+   │     → payload (10진수 member_id 문자열)
+   ├─ Long.parseLong(payload) → member_id
+   ├─ MemberRepository.findById(memberId)
+   └─ S3 프로필 이미지 presigned URL 생성
+        ↓
+응답: { valid, payload, source, creator: {id, nickname, profileImage, ...}, message }
+        ↓
+verify.js → 검증 상태 배지(녹/적/회) + 작가 카드 + 메시지 노출
+```
+
+### 컨트롤러 — 비동기 호출의 동기 적응
+
+ML 호출은 `Mono` 인데 컨트롤러는 동기 응답을 돌려줘야 함. `blockOptional(Duration.ofMinutes(2))` 으로
+**2분 타임아웃 안에 결과 받거나 빈 결과** 패턴. 영상 워터마크 추출이 길어질 수 있어 여유를 둠.
+
+```java
+ExtractedResult extracted = watermarkApiClient
+        .extract(fileBytes, contentType, file.getOriginalFilename())
+        .blockOptional(Duration.ofMinutes(2))
+        .orElse(null);
+
+if (extracted != null && extracted.valid() && extracted.payload() != null) {
+    Long memberId = Long.parseLong(extracted.payload().trim());
+    MemberVO member = memberRepository.findById(memberId).orElse(null);
+    // creator 카드 생성 ...
+}
+```
+
+ML 서버가 꺼져있어도 `Mono.empty()` 로 흡수되어 페이지가 죽지 않고 "워터마크를 찾지 못했습니다"
+메시지가 표시됨.
+
+### 진단용 — workId 로 S3 파일 직접 검증
+
+내가 올린 작품에 워터마크가 제대로 박혔는지 다운로드/재업로드 라운드트립 없이 바로 확인하는
+엔드포인트:
+
+```
+POST /api/watermark/verify/work/{workId}
+```
+
+`WorkDAO.findFilesByWorkId(workId)` → sort_order 우선순위로 미디어 파일 1개 고름 →
+`S3FileService.downloadBytes(fileUrl)` → `extract()` → 응답. 시연에서 "방금 올린 작품 워터마크
+확인해 보자" 같은 시나리오용.
+
+### JS — 드래그앤드롭 + 즉시 미리보기
+
+`URL.createObjectURL(file)` 로 업로드 전에 미리보기. 영상은 `<video controls muted>` 로 인라인
+재생까지 가능. submit 시 같은 `FormData` 를 fetch 로 전송.
+
+```javascript
+drop.addEventListener('drop', e => {
+    const file = e.dataTransfer?.files?.[0];
+    if (!file) return;
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    fileInput.files = dt.files;   // <input type="file"> 에 강제 주입
+    showPreview(file);
+});
+```
+
+`<input type="file">` 에 프로그래매틱으로 파일을 넣을 때 `DataTransfer` 우회 — 브라우저 보안상
+직접 `fileInput.files = [file]` 은 안 됨.
+
+### 🔧 트러블슈팅 — 두 워크스페이스 사이에서 검증 페이지가 사라져 있었음
+
+**증상**: 분명히 만들었던 `/watermark/verify` 페이지가 현재 워크스페이스에 없음.
+
+**원인**: 프로젝트가 두 워크스페이스로 갈라져있었고 (`aws/workspace/bideo`, `spring/workspace/bideo`),
+검증 페이지는 후자에만 있었음. 메인 작업이 전자로 옮겨오면서 미동기화.
+
+**해결**: 컨트롤러 / HTML / CSS / JS 를 복사하면서 호환성 조정:
+- 구버전이 의존하던 `tbl_work_file.file_hash` 컬럼 — 우리 워크스페이스엔 없어서 **해시 fallback 분기 제거**.
+  FastAPI extract 결과만 사용.
+- 구버전 verify.html 의 `yt-shell__page-content` → 우리 워크스페이스 컨벤션 `bd-shell__page-content` 로 클래스명 통일.
+- 메뉴 진입점은 사이드바가 아닌 프로필 드롭다운에 배치 (재논의 결과).
 
 ---
 
